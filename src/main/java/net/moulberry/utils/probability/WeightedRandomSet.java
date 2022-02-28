@@ -13,6 +13,8 @@ import java.util.function.Consumer;
 
 public class WeightedRandomSet<E> implements Set<E> {
 
+    // region [Node Class Definitions]
+
     private static abstract class Node<E> {
         float weight;
         int leaves = 0;
@@ -102,6 +104,8 @@ public class WeightedRandomSet<E> implements Set<E> {
         }
     }
 
+    // endregion
+
     private final boolean supportSimultaneousIteration;
     private final HashMap<E, LeafNode<E>> map = new HashMap<>();
     private int iterationId = 0;
@@ -115,13 +119,79 @@ public class WeightedRandomSet<E> implements Set<E> {
         this.supportSimultaneousIteration = supportSimultaneousIteration;
     }
 
-    // Numbers
-
     @Contract(pure = true)
     public float totalWeight() {
         if (root == null) return 0;
         return root.weight;
     }
+
+    public WeightedRandomSet<E> deepClone() {
+        WeightedRandomSet<E> v = new WeightedRandomSet<>();
+        for (Map.Entry<E, LeafNode<E>> entry : map.entrySet()) {
+            v.add(entry.getKey(), entry.getValue().weight);
+        }
+        return v;
+    }
+
+    @Contract(pure = true)
+    public @Flow(sourceIsContainer = true) @Nullable E sample() {
+        if (root == null) return null;
+
+        LeafNode<E> node = get(ThreadLocalRandom.current().nextFloat(root.weight));
+
+        if (node == null) {
+            return null;
+        } else {
+            return node.element;
+        }
+    }
+
+    @Contract(mutates = "this")
+    public @Flow(sourceIsContainer = true) @Nullable E pop() {
+        if (root == null) return null;
+
+        LeafNode<E> node = get(ThreadLocalRandom.current().nextFloat(root.weight));
+
+        if (node == null) {
+            return null;
+        } else {
+            removeNode(node);
+            map.remove(node.element);
+            return node.element;
+        }
+    }
+
+    @Contract(mutates = "this")
+    public boolean add(@Flow(targetIsContainer = true) @NotNull E e, float weight) {
+        Objects.requireNonNull(e);
+
+        assert weight > 0;
+        if (map.containsKey(e)) return false; // Already have element
+
+        LeafNode<E> newNode = new LeafNode<>(e, weight);
+
+        if (root == null) {
+            root = newNode;
+        } else {
+            Node<E> node = root;
+
+            while (node instanceof InternalNode<E> internal) {
+                if (internal.left.leaves <= internal.right.leaves) {
+                    node = internal.left;
+                } else {
+                    node = internal.right;
+                }
+            }
+
+            insert(node, newNode);
+        }
+
+        this.iterationId = 0;
+        map.put(e, newNode);
+        return true;
+    }
+
+    // region [Set Method Implementations]
 
     @Override
     @Contract(pure = true)
@@ -131,7 +201,175 @@ public class WeightedRandomSet<E> implements Set<E> {
         return root.leaves;
     }
 
-    // Other
+    @Override
+    public boolean isEmpty() {
+        return root == null;
+    }
+
+    @Override
+    @Contract(pure = true)
+    public boolean contains(@NotNull Object element) {
+        return map.containsKey(element);
+    }
+
+    @Override
+    public Object[] toArray() {
+        Object[] objects = new Object[this.size()];
+        int index = 0;
+        for (E e : this) {
+            objects[index++] = e;
+        }
+        return objects;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public <T> T[] toArray(T[] a) {
+        if (a.length < this.size()) {
+            a = (T[]) Array.newInstance(a.getClass().getComponentType(), this.size());
+        }
+
+        int index = 0;
+        for (E e : this) {
+            a[index++] = (T) e;
+        }
+        while (index < a.length) {
+            a[index++] = null;
+        }
+        return a;
+    }
+
+    @Override
+    public boolean add(E e) {
+        return add(e, 1);
+    }
+
+    @Override
+    public boolean remove(Object o) {
+        LeafNode<E> node = map.get(o);
+        if (node == null) return false;
+
+        removeNode(node);
+
+        map.remove(o);
+        return true;
+    }
+
+    @Override
+    public boolean containsAll(@NotNull Collection<?> c) {
+        return map.keySet().containsAll(c);
+    }
+
+    @Override
+    public boolean addAll(@NotNull Collection<? extends E> c) {
+        boolean modified = false;
+        for (E e : c) {
+            modified |= this.add(e);
+        }
+        return modified;
+    }
+
+    @Override
+    public boolean retainAll(@NotNull Collection<?> c) {
+        if (!(c instanceof Set<?>)) c = new HashSet<>(c); // Ensure c has O(1) contains
+
+        for (Map.Entry<E, LeafNode<E>> entry : this.map.entrySet()) {
+            if (!c.contains(entry.getKey())) {
+                removeNode(entry.getValue());
+            }
+        }
+
+        return this.map.keySet().retainAll(c);
+    }
+
+    @Override
+    public boolean removeAll(@NotNull Collection<?> c) {
+        if (!(c instanceof Set<?>)) c = new HashSet<>(c); // Ensure c has O(1) contains
+
+        for (Map.Entry<E, LeafNode<E>> entry : this.map.entrySet()) {
+            if (c.contains(entry.getKey())) {
+                removeNode(entry.getValue());
+            }
+        }
+
+        return this.map.keySet().removeAll(c);
+    }
+
+    @Override
+    public void clear() {
+        this.map.clear();
+        this.root = null;
+        this.iterationId = 0;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (o == this) return true;
+
+        if (!(o instanceof Set)) return false;
+        Collection<?> c = (Collection<?>) o;
+
+        if (c.size() != size()) return false;
+        try {
+            return containsAll(c);
+        } catch (ClassCastException | NullPointerException unused) {
+            return false;
+        }
+    }
+
+    @Override
+    public int hashCode() {
+        return map.keySet().hashCode();
+    }
+
+    @Override
+    public String toString() {
+        return Arrays.toString(toArray());
+    }
+
+    // endregion
+
+    // region [Iterator]
+
+    @NotNull
+    @Override
+    public Iterator<E> iterator() {
+        Node<E> root = this.root;
+
+        if (root instanceof LeafNode<E> leafRoot) {
+            E e = leafRoot.element;
+            return new Iterator<>() {
+                private boolean hasNext = true;
+                public boolean hasNext() {
+                    return hasNext;
+                }
+                public E next() {
+                    if (!hasNext) throw new NoSuchElementException();
+                    hasNext = false;
+                    return e;
+
+                }
+                @Override
+                public void forEachRemaining(Consumer<? super E> action) {
+                    Objects.requireNonNull(action);
+                    if (hasNext) {
+                        hasNext = false;
+                        action.accept(e);
+                    }
+                }
+            };
+        } else if (root instanceof InternalNode<E>) {
+            if (supportSimultaneousIteration) {
+                // noinspection unchecked
+                return this.deepClone().unsafeIterator();
+            } else {
+                return unsafeIterator();
+            }
+        }
+
+        return Collections.emptyIterator();
+    }
+
 
     private Iterator<E> unsafeIterator() {
         assert root != null;
@@ -184,199 +422,9 @@ public class WeightedRandomSet<E> implements Set<E> {
         };
     }
 
-    @NotNull
-    @Override
-    public Iterator<E> iterator() {
-        Node<E> root = this.root;
+    // endregion
 
-        if (root instanceof LeafNode<E> leafRoot) {
-            E e = leafRoot.element;
-            return new Iterator<>() {
-                private boolean hasNext = true;
-                public boolean hasNext() {
-                    return hasNext;
-                }
-                public E next() {
-                    if (!hasNext) throw new NoSuchElementException();
-                    hasNext = false;
-                    return e;
-
-                }
-                @Override
-                public void forEachRemaining(Consumer<? super E> action) {
-                    Objects.requireNonNull(action);
-                    if (hasNext) {
-                        hasNext = false;
-                        action.accept(e);
-                    }
-                }
-            };
-        } else if (root instanceof InternalNode<E>) {
-            if (supportSimultaneousIteration) {
-                // noinspection unchecked
-                return this.deepClone().unsafeIterator();
-            } else {
-                return unsafeIterator();
-            }
-        }
-
-        return Collections.emptyIterator();
-    }
-
-    public WeightedRandomSet<E> deepClone() {
-        WeightedRandomSet<E> v = new WeightedRandomSet<>();
-        for (Map.Entry<E, LeafNode<E>> entry : map.entrySet()) {
-            v.add(entry.getKey(), entry.getValue().weight);
-        }
-        return v;
-    }
-
-    @Override
-    public Object[] toArray() {
-        Object[] objects = new Object[this.size()];
-        int index = 0;
-        for (E e : this) {
-            objects[index++] = e;
-        }
-        // noinspection unchecked
-        return objects;
-    }
-
-    @Override
-    @SuppressWarnings("unchecked")
-    public <T> T[] toArray(T[] a) {
-        if (a.length < this.size()) {
-            a = (T[]) Array.newInstance(a.getClass().getComponentType(), this.size());
-        }
-
-        int index = 0;
-        for (E e : this) {
-            a[index++] = (T) e;
-        }
-        while (index < a.length) {
-            a[index++] = null;
-        }
-        return a;
-    }
-
-    @Override
-    public boolean isEmpty() {
-        return root == null;
-    }
-
-    @Override
-    @Contract(pure = true)
-    public boolean contains(@NotNull Object element) {
-        return map.containsKey(element);
-    }
-
-    @Override
-    public boolean containsAll(@NotNull Collection<?> c) {
-        return map.keySet().containsAll(c);
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (o == this) return true;
-
-        if (!(o instanceof Set)) return false;
-        Collection<?> c = (Collection<?>) o;
-
-        if (c.size() != size()) return false;
-        try {
-            return containsAll(c);
-        } catch (ClassCastException | NullPointerException unused) {
-            return false;
-        }
-    }
-
-    @Override
-    public int hashCode() {
-        return map.keySet().hashCode();
-    }
-
-    @Override
-    public boolean addAll(@NotNull Collection<? extends E> c) {
-        boolean modified = false;
-        for (E e : c) {
-            modified |= this.add(e);
-        }
-        return modified;
-    }
-
-    @Override
-    public boolean retainAll(@NotNull Collection<?> c) {
-        if (!(c instanceof Set<?>)) c = new HashSet<>(c); // Ensure c has O(1) contains
-
-        for (Map.Entry<E, LeafNode<E>> entry : this.map.entrySet()) {
-            if (!c.contains(entry.getKey())) {
-                removeNode(entry.getValue());
-            }
-        }
-
-        return this.map.keySet().retainAll(c);
-    }
-
-    @Override
-    public boolean removeAll(@NotNull Collection<?> c) {
-        if (!(c instanceof Set<?>)) c = new HashSet<>(c); // Ensure c has O(1) contains
-
-        for (Map.Entry<E, LeafNode<E>> entry : this.map.entrySet()) {
-            if (c.contains(entry.getKey())) {
-                removeNode(entry.getValue());
-            }
-        }
-
-        return this.map.keySet().removeAll(c);
-    }
-
-    @Override
-    public void clear() {
-        this.map.clear();
-        this.root = null;
-        this.iterationId = 0;
-    }
-
-    // Getters
-
-    @Override
-    public boolean remove(Object o) {
-        LeafNode<E> node = map.get(o);
-        if (node == null) return false;
-
-        removeNode(node);
-
-        map.remove(o);
-        return true;
-    }
-
-    @Contract(pure = true)
-    public @Flow(sourceIsContainer = true) @Nullable E sample() {
-        if (root == null) return null;
-
-        LeafNode<E> node = get(ThreadLocalRandom.current().nextFloat(root.weight));
-
-        if (node == null) {
-            return null;
-        } else {
-            return node.element;
-        }
-    }
-
-    @Contract(mutates = "this")
-    public @Flow(sourceIsContainer = true) @Nullable E pop() {
-        if (root == null) return null;
-
-        LeafNode<E> node = get(ThreadLocalRandom.current().nextFloat(root.weight));
-
-        if (node == null) {
-            return null;
-        } else {
-            removeNode(node);
-            map.remove(node.element);
-            return node.element;
-        }
-    }
+    // region [Internal Implementation]
 
     private void removeNode(LeafNode<E> node) {
         this.iterationId = 0;
@@ -424,48 +472,6 @@ public class WeightedRandomSet<E> implements Set<E> {
         return null;
     }
 
-    // Setters
-
-    @Override
-    public boolean add(E e) {
-        return add(e, 1);
-    }
-
-    @Contract(mutates = "this")
-    public boolean add(@Flow(targetIsContainer = true) @NotNull E e, float weight) {
-        Objects.requireNonNull(e);
-
-        assert weight > 0;
-        if (map.containsKey(e)) return false; // Already have element
-
-        LeafNode<E> newNode = new LeafNode<>(e, weight);
-
-        if (root == null) {
-            root = newNode;
-        } else {
-            Node<E> node = root;
-
-            while (node instanceof InternalNode<E> internal) {
-                if (internal.left.leaves <= internal.right.leaves) {
-                    node = internal.left;
-                } else {
-                    node = internal.right;
-                }
-            }
-
-            insert(node, newNode);
-        }
-
-        this.iterationId = 0;
-        map.put(e, newNode);
-        return true;
-    }
-
-    @Override
-    public String toString() {
-        return Arrays.toString(toArray());
-    }
-
     private void insert(@NotNull Node<E> leaf, @NotNull Node<E> newNode) {
         InternalNode<E> parent = new InternalNode<>(leaf.weight, leaf, newNode);
         parent.leaves = 1;
@@ -492,5 +498,7 @@ public class WeightedRandomSet<E> implements Set<E> {
             node = node.parent;
         }
     }
+
+    // endregion
 
 }
